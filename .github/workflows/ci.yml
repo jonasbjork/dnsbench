@@ -1,0 +1,193 @@
+name: Test and build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            goos: linux
+            goarch: amd64
+          - name: Windows
+            goos: windows
+            goarch: amd64
+          - name: macOS
+            goos: darwin
+            goarch: amd64
+          - name: macOS Apple Silicon
+            goos: darwin
+            goarch: arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build and package
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p staging dist
+          binary="dnsbench"
+          if [ "$GOOS" = "windows" ]; then
+            binary="dnsbench.exe"
+          fi
+
+          go build -trimpath -o "staging/$binary" ./src
+
+          archive="dnsbench-${GOOS}-${GOARCH}"
+          if [ "$GOOS" = "windows" ]; then
+            zip -j "dist/${archive}.zip" "staging/$binary"
+          else
+            tar -C staging -czf "dist/${archive}.tar.gz" "$binary"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dnsbench-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  package-ubuntu:
+    name: Package Ubuntu
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build Debian package
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          package_root="dist/dnsbench_0.1.0+github.${GITHUB_RUN_NUMBER}_amd64"
+          install -d "${package_root}/DEBIAN" "${package_root}/usr/bin"
+          go build -trimpath -o "${package_root}/usr/bin/dnsbench" ./src
+
+          cat > "${package_root}/DEBIAN/control" <<EOF
+          Package: dnsbench
+          Version: 0.1.0+github.${GITHUB_RUN_NUMBER}
+          Section: net
+          Priority: optional
+          Architecture: amd64
+          Maintainer: dnsbench contributors
+          Description: Benchmark response times from DNS servers
+          EOF
+
+          dpkg-deb --root-owner-group --build "$package_root"
+
+      - name: Upload Ubuntu package
+        uses: actions/upload-artifact@v7
+        with:
+          name: dnsbench-ubuntu-amd64
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  package-fedora:
+    name: Package Fedora 44
+    needs: test
+    runs-on: ubuntu-latest
+    container:
+      image: quay.io/fedora/fedora:44
+      options: --user 0
+
+    steps:
+      - name: Install RPM build tools
+        run: dnf install -y rpm-build
+
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build RPM package
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          install -d rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          go build -trimpath -o rpmbuild/SOURCES/dnsbench ./src
+
+          cat > rpmbuild/SPECS/dnsbench.spec <<EOF
+          Name: dnsbench
+          Version: 0.1.0
+          Release: ${GITHUB_RUN_NUMBER}%{?dist}
+          Summary: Benchmark response times from DNS servers
+          License: Unspecified
+          Source0: dnsbench
+
+          %description
+          A small command-line tool for benchmarking DNS server response times.
+
+          %install
+          install -Dpm 0755 %{SOURCE0} %{buildroot}%{_bindir}/dnsbench
+
+          %files
+          %{_bindir}/dnsbench
+          EOF
+
+          rpmbuild -bb --define "_topdir ${PWD}/rpmbuild" rpmbuild/SPECS/dnsbench.spec
+
+      - name: Upload Fedora package
+        uses: actions/upload-artifact@v7
+        with:
+          name: dnsbench-fedora-44-x86_64
+          path: rpmbuild/RPMS/**/*.rpm
+          if-no-files-found: error
+          retention-days: 14
