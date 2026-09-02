@@ -40,6 +40,41 @@ func TestBuildDNSQueryRejectsLongLabel(t *testing.T) {
 	}
 }
 
+func TestBuildDNSQueryAcceptsTrailingDot(t *testing.T) {
+	packet, _, err := dnsbench.BuildDNSQuery("google.se.")
+	if err != nil {
+		t.Fatalf("BuildDNSQuery() error = %v", err)
+	}
+
+	wantQuestion := []byte{6, 'g', 'o', 'o', 'g', 'l', 'e', 2, 's', 'e', 0, 0, 1, 0, 1}
+	if got := packet[12:]; !reflect.DeepEqual(got, wantQuestion) {
+		t.Errorf("question = %v, want %v", got, wantQuestion)
+	}
+}
+
+func TestBuildDNSQueryRejectsEmptyLabel(t *testing.T) {
+	for _, domain := range []string{"", ".", "google..se"} {
+		t.Run(domain, func(t *testing.T) {
+			if _, _, err := dnsbench.BuildDNSQuery(domain); err == nil {
+				t.Fatalf("BuildDNSQuery(%q) error = nil, want an error", domain)
+			}
+		})
+	}
+}
+
+func TestBuildDNSQueryRejectsLongName(t *testing.T) {
+	domain := strings.Join([]string{
+		strings.Repeat("a", 63),
+		strings.Repeat("b", 63),
+		strings.Repeat("c", 63),
+		strings.Repeat("d", 62),
+	}, ".")
+
+	if _, _, err := dnsbench.BuildDNSQuery(domain); err == nil {
+		t.Fatal("BuildDNSQuery() error = nil, want an error")
+	}
+}
+
 func TestMedian(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -80,6 +115,22 @@ func TestCalculateResultWithNoResponses(t *testing.T) {
 	result := dnsbench.CalculateResult("9.9.9.9", nil, 2)
 	if result.Success != 0 || result.Failed != 2 || result.Loss != 100 {
 		t.Errorf("CalculateResult() = %+v, want 0 successes, 2 failures and 100%% loss", result)
+	}
+}
+
+func TestCalculateResultWithInvalidCount(t *testing.T) {
+	for _, count := range []int{0, -1} {
+		result := dnsbench.CalculateResult("9.9.9.9", nil, count)
+		if result.Server != "9.9.9.9" || result.Loss != 0 || result.Success != 0 || result.Failed != 0 {
+			t.Errorf("CalculateResult(count=%d) = %+v, want an empty result", count, result)
+		}
+	}
+}
+
+func TestProbeServerWithInvalidCount(t *testing.T) {
+	result := dnsbench.ProbeServer("9.9.9.9", "google.se", -1)
+	if result.Server != "9.9.9.9" || result.Success != 0 || result.Failed != 0 {
+		t.Errorf("ProbeServer() = %+v, want an empty result", result)
 	}
 }
 

@@ -37,6 +37,11 @@ type Result struct {
 }
 
 func BuildDNSQuery(domain string) ([]byte, uint16, error) {
+	domain = strings.TrimSuffix(domain, ".")
+	if domain == "" {
+		return nil, 0, fmt.Errorf("ogiltig domän: tomt namn")
+	}
+
 	id := uint16(rand.Intn(65536))
 	packet := make([]byte, 12)
 
@@ -45,8 +50,14 @@ func BuildDNSQuery(domain string) ([]byte, uint16, error) {
 	binary.BigEndian.PutUint16(packet[4:6], 1)
 
 	for _, part := range strings.Split(domain, ".") {
+		if part == "" {
+			return nil, 0, fmt.Errorf("ogiltig domän: tom label")
+		}
 		if len(part) > 63 {
 			return nil, 0, fmt.Errorf("ogiltig domän: label för lång")
+		}
+		if len(packet)-12+len(part)+2 > 255 {
+			return nil, 0, fmt.Errorf("ogiltig domän: namnet för långt")
 		}
 
 		packet = append(packet, byte(len(part)))
@@ -88,14 +99,33 @@ func QueryDNS(server, domain string) (float64, error) {
 	}
 	elapsed := time.Since(start)
 
-	if n < 12 {
-		return 0, fmt.Errorf("ogiltigt DNS-svar")
-	}
-	if binary.BigEndian.Uint16(response[0:2]) != transactionID {
-		return 0, fmt.Errorf("fel transaction ID")
+	if err := validateDNSResponse(response[:n], transactionID); err != nil {
+		return 0, err
 	}
 
 	return float64(elapsed.Microseconds()) / 1000.0, nil
+}
+
+func validateDNSResponse(response []byte, transactionID uint16) error {
+	if len(response) < 12 {
+		return fmt.Errorf("ogiltigt DNS-svar")
+	}
+	if binary.BigEndian.Uint16(response[0:2]) != transactionID {
+		return fmt.Errorf("fel transaction ID")
+	}
+
+	flags := binary.BigEndian.Uint16(response[2:4])
+	if flags&0x8000 == 0 {
+		return fmt.Errorf("ogiltigt DNS-svar: response-flagga saknas")
+	}
+	if flags&0x0200 != 0 {
+		return fmt.Errorf("avkortat DNS-svar")
+	}
+	if rcode := flags & 0x000f; rcode != 0 {
+		return fmt.Errorf("DNS-servern returnerade felkod %d", rcode)
+	}
+
+	return nil
 }
 
 func Median(values []float64) float64 {
@@ -114,6 +144,10 @@ func Median(values []float64) float64 {
 }
 
 func ProbeServer(server, domain string, count int) Result {
+	if count <= 0 {
+		return Result{Server: server}
+	}
+
 	times := make([]float64, 0, count)
 
 	for i := 0; i < count; i++ {
@@ -127,6 +161,10 @@ func ProbeServer(server, domain string, count int) Result {
 }
 
 func CalculateResult(server string, times []float64, count int) Result {
+	if count <= 0 {
+		return Result{Server: server}
+	}
+
 	success := len(times)
 	failed := count - success
 	result := Result{
